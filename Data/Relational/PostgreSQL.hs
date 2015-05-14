@@ -51,8 +51,8 @@ import qualified Database.PostgreSQL.Simple.FromRow as PFR
 import qualified Data.Text as T
 import Data.Int (Int64)
 import Data.Time.Calendar
-
 import Data.Relational
+import Data.Relational.Universe
 import Data.Relational.Interpreter
 
 data PostgresInterpreter = PostgresInterpreter
