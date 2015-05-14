@@ -51,6 +51,7 @@ import qualified Database.PostgreSQL.Simple.FromRow as PFR
 import qualified Data.Text as T
 import Data.Int (Int64)
 import Data.Time.Calendar
+import Data.Time.Clock
 import Data.Relational
 import Data.Relational.Universe
 import Data.Relational.Interpreter
@@ -74,6 +75,7 @@ instance RelationalInterpreter PostgresInterpreter where
       UDouble :: Double -> Universe PostgresInterpreter t
       UBool :: Bool -> Universe PostgresInterpreter t
       UDay :: Day -> Universe PostgresInterpreter t
+      UUTCTime :: UTCTime -> Universe PostgresInterpreter t
       UNullable :: Maybe (Universe PostgresInterpreter t) -> Universe PostgresInterpreter (Maybe t)
 
     type InterpreterMonad PostgresInterpreter = PostgresMonad
@@ -195,6 +197,13 @@ instance InUniverse PostgresUniverse Day where
   toUniverseAssociated proxy = UDay
   fromUniverseAssociated (UDay d) = d
 
+instance InUniverse PostgresUniverse UTCTime where
+  toUniverse proxy = UUTCTime
+  fromUniverse proxy (UUTCTime t) = Just t
+  type UniverseType PostgresUniverse UTCTime = UTCTime
+  toUniverseAssociated proxy = UUTCTime
+  fromUniverseAssociated (UUTCTime t) = t
+
 instance InUniverse PostgresUniverse a => InUniverse PostgresUniverse (Maybe a) where
   toUniverse proxyU = UNullable . fmap (toUniverse proxyU)
   fromUniverse (Proxy :: Proxy (Maybe a)) (UNullable x) = do
@@ -212,6 +221,7 @@ instance PTF.ToField T.Text => PTF.ToField ((Universe PostgresInterpreter) t) wh
       UDouble d -> PTF.toField d
       UBool b -> PTF.toField b
       UDay d -> PTF.toField d
+      UUTCTime t -> PTF.toField t
       UNullable mebe -> PTF.toField mebe
 
 instance
