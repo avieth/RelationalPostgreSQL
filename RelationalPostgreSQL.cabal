@@ -37,9 +37,10 @@ library
                      , DeriveFunctor
 
   build-depends:       base >=4.7 && <4.8
-                     , transformers >=0.3 && <0.4
+                     , transformers >=0.3 && <0.5
                      , postgresql-simple >=0.4 && <0.5
                      , text >=1.2 && <1.3
+                     , bytestring >= 0.10
                      , time >=1.4 && <1.5
                      , Relational >=0.1 && <0.2
                      , RelationalInterpreter >=0.1 && <0.2
