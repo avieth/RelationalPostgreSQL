@@ -29,10 +29,10 @@ Portability : non-portable (GHC only)
 module Data.Relational.PostgreSQL (
 
     PostgresInterpreter(..)
-  , PostgresMonad
+  , PostgresT
   , Universe(..)
   , PostgresUniverse
-  , runPostgresInterpreter
+  , runPostgresT
 
   ) where
 
@@ -58,37 +58,35 @@ import Data.Relational
 import Data.Relational.Universe
 import Data.Relational.Interpreter
 
-data PostgresInterpreter = PostgresInterpreter
-type PostgresUniverse = Universe PostgresInterpreter
+data PostgresInterpreter (m :: * -> *) = PostgresInterpreter
+type PostgresUniverse m = Universe (PostgresInterpreter m)
 
-newtype PostgresMonad a = PostgresMonad {
-    exitPostgresMonad :: ReaderT P.Connection IO a
-  } deriving (Functor, Applicative, Monad)
+newtype PostgresT m a = PostgresT {
+    exitPostgresT :: ReaderT P.Connection m a
+  } deriving (Functor, Applicative, Monad, MonadTrans, MonadIO)
 
-runPostgresInterpreter connInfo pm = do
-    conn <- P.connect connInfo
-    P.withTransaction conn (runReaderT (exitPostgresMonad pm) conn)
+runPostgresT :: MonadIO m => P.ConnectInfo -> (forall a . m a -> IO a) -> PostgresT m a -> m a
+runPostgresT connInfo ioRunner pm = do
+    conn <- liftIO $ P.connect connInfo
+    liftIO $ P.withTransaction conn (ioRunner (runReaderT (exitPostgresT pm) conn))
 
-instance MonadIO PostgresMonad where
-    liftIO = PostgresMonad . liftIO
+instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m) where
 
-instance RelationalInterpreter PostgresInterpreter where
+    data Universe (PostgresInterpreter m) t where
+      UText :: T.Text -> Universe (PostgresInterpreter m) t
+      UBytes :: BS.ByteString -> Universe (PostgresInterpreter m) t
+      UInt :: Int -> Universe (PostgresInterpreter m) t
+      UDouble :: Double -> Universe (PostgresInterpreter m) t
+      UBool :: Bool -> Universe (PostgresInterpreter m) t
+      UDay :: Day -> Universe (PostgresInterpreter m) t
+      UUTCTime :: UTCTime -> Universe (PostgresInterpreter m) t
+      UNullable :: Maybe (Universe (PostgresInterpreter m) t) -> Universe (PostgresInterpreter m) (Maybe t)
 
-    data Universe PostgresInterpreter t where
-      UText :: T.Text -> Universe PostgresInterpreter t
-      UBytes :: BS.ByteString -> Universe PostgresInterpreter t
-      UInt :: Int -> Universe PostgresInterpreter t
-      UDouble :: Double -> Universe PostgresInterpreter t
-      UBool :: Bool -> Universe PostgresInterpreter t
-      UDay :: Day -> Universe PostgresInterpreter t
-      UUTCTime :: UTCTime -> Universe PostgresInterpreter t
-      UNullable :: Maybe (Universe PostgresInterpreter t) -> Universe PostgresInterpreter (Maybe t)
+    type InterpreterMonad (PostgresInterpreter m) = PostgresT m
 
-    type InterpreterMonad PostgresInterpreter = PostgresMonad
-
-    type InterpreterSelectConstraint PostgresInterpreter db =
-             ( Every PTF.ToField (Fmap PostgresUniverse (Snds (Concat (Snds db))))
-             , Every PFF.FromField (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+    type InterpreterSelectConstraint (PostgresInterpreter m) db =
+             ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
+             , Every PFF.FromField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              , TypeList (Snds (Concat (Snds db)))
              )
 
@@ -96,7 +94,7 @@ instance RelationalInterpreter PostgresInterpreter where
         let actualQuery :: P.Query
             actualQuery = fromString (makeSelectQuery select)
 
-            parameters :: HList (Fmap PostgresUniverse (Snds (Concat conditioned)))
+            parameters :: HList (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
             parameters = allToUniverse proxyU proxyDB (conditionValues (selectCondition select))
 
             containsFmapProof1 = fmapContainsProof proxyU proxyDBFlat proxyConditioned
@@ -113,7 +111,7 @@ instance RelationalInterpreter PostgresInterpreter where
             typeListProof2 = case typeListProof1 of
                 TypeListProof -> typeListFmapProof proxyU proxyProjected
 
-            doQuery :: P.Connection -> IO [HList (Fmap PostgresUniverse (Snds projected))]
+            doQuery :: P.Connection -> IO [HList (Fmap (PostgresUniverse m) (Snds projected))]
             doQuery = case (everyToField, everyFromField, typeListProof2) of
                 (EveryConstraint, EveryConstraint, TypeListProof) -> \conn -> P.query conn actualQuery parameters
 
@@ -121,13 +119,13 @@ instance RelationalInterpreter PostgresInterpreter where
                 Nothing -> []
                 Just x -> [x]
 
-            proxyU :: Proxy (Universe PostgresInterpreter)
+            proxyU :: Proxy (Universe (PostgresInterpreter m))
             proxyU = Proxy
 
             proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
             proxyDBFlat = Proxy
 
-            proxyDBU :: Proxy (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+            proxyDBU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
             proxyDBU = Proxy
 
             proxyToField :: Proxy PTF.ToField
@@ -139,21 +137,21 @@ instance RelationalInterpreter PostgresInterpreter where
             proxyConditioned :: Proxy (Snds (Concat conditioned))
             proxyConditioned = Proxy
 
-            proxyConditionedU :: Proxy (Fmap PostgresUniverse (Snds (Concat conditioned)))
+            proxyConditionedU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
             proxyConditionedU = Proxy
 
             proxyProjected :: Proxy (Snds projected)
             proxyProjected = Proxy
 
-            proxyProjectedU :: Proxy (Fmap PostgresUniverse (Snds projected))
+            proxyProjectedU :: Proxy (Fmap (PostgresUniverse m) (Snds projected))
             proxyProjectedU = Proxy
 
-        in  PostgresMonad $ do
+        in  PostgresT $ do
                 conn <- ask
-                fmap ((=<<) makeRows) (lift (doQuery conn))
+                fmap ((=<<) makeRows) (liftIO (doQuery conn))
 
-    type InterpreterInsertConstraint PostgresInterpreter db =
-             ( Every PTF.ToField (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+    type InterpreterInsertConstraint (PostgresInterpreter m) db =
+             ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              )
 
     interpretInsert proxyPI (proxyDB :: Proxy db) (insert :: Insert '(tableName, schema)) =
@@ -163,7 +161,7 @@ instance RelationalInterpreter PostgresInterpreter where
             hlist :: HList (Snds schema)
             hlist = rowToHList (insertRow insert)
 
-            parameters :: HList (Fmap PostgresUniverse (Snds schema))
+            parameters :: HList (Fmap (PostgresUniverse m) (Snds schema))
             parameters = allToUniverse proxyU proxyDB hlist
 
             containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxySchema
@@ -175,7 +173,7 @@ instance RelationalInterpreter PostgresInterpreter where
             doQuery = case everyToField of
                 EveryConstraint -> \conn -> P.execute conn statement parameters
 
-            proxyU :: Proxy PostgresUniverse
+            proxyU :: Proxy (PostgresUniverse m)
             proxyU = Proxy
 
             proxyToField :: Proxy PTF.ToField
@@ -184,36 +182,36 @@ instance RelationalInterpreter PostgresInterpreter where
             proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
             proxyDBFlat = Proxy
 
-            proxyDBU :: Proxy (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+            proxyDBU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
             proxyDBU = Proxy
 
             proxySchema :: Proxy (Snds schema)
             proxySchema = Proxy
 
-            proxySchemaU :: Proxy (Fmap PostgresUniverse (Snds schema))
+            proxySchemaU :: Proxy (Fmap (PostgresUniverse m) (Snds schema))
             proxySchemaU = Proxy
 
-        in  PostgresMonad $ do
+        in  PostgresT $ do
                 conn <- ask
-                lift (doQuery conn)
+                liftIO (doQuery conn)
                 return ()
 
-    type InterpreterUpdateConstraint PostgresInterpreter db =
-             ( Every PTF.ToField (Fmap PostgresUniverse (Snds (Concat (Snds db))))
-             , Every PTF.ToField (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+    type InterpreterUpdateConstraint (PostgresInterpreter m) db =
+             ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
+             , Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              )
 
     interpretUpdate proxyPI (proxyDB :: Proxy db) (update :: Update '(tableName, schema) projected conditioned) =
         let statement :: P.Query
             statement = fromString (makeUpdateStatement update)
 
-            conditionParameters :: HList (Fmap PostgresUniverse (Snds (Concat conditioned)))
+            conditionParameters :: HList (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
             conditionParameters = allToUniverse proxyU proxyDB (conditionValues (updateCondition update))
 
             hlist :: HList (Snds projected)
             hlist = rowToHList (updateColumns update)
 
-            assignmentParameters :: HList (Fmap PostgresUniverse (Snds projected))
+            assignmentParameters :: HList (Fmap (PostgresUniverse m) (Snds projected))
             assignmentParameters = allToUniverse proxyU proxyDB hlist
 
             parameters = assignmentParameters PT.:. conditionParameters
@@ -232,13 +230,13 @@ instance RelationalInterpreter PostgresInterpreter where
                 (EveryConstraint, EveryConstraint) -> \conn ->
                     P.execute conn statement parameters
 
-            proxyU :: Proxy PostgresUniverse
+            proxyU :: Proxy (PostgresUniverse m)
             proxyU = Proxy
 
             proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
             proxyDBFlat = Proxy
 
-            proxyDBU :: Proxy (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+            proxyDBU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
             proxyDBU = Proxy
 
             proxyToField :: Proxy PTF.ToField
@@ -247,29 +245,29 @@ instance RelationalInterpreter PostgresInterpreter where
             proxyConditioned :: Proxy (Snds (Concat conditioned))
             proxyConditioned = Proxy
 
-            proxyConditionedU :: Proxy (Fmap PostgresUniverse (Snds (Concat conditioned)))
+            proxyConditionedU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
             proxyConditionedU = Proxy
 
             proxyProjected :: Proxy (Snds projected)
             proxyProjected = Proxy
 
-            proxyProjectedU :: Proxy (Fmap PostgresUniverse (Snds projected))
+            proxyProjectedU :: Proxy (Fmap (PostgresUniverse m) (Snds projected))
             proxyProjectedU = Proxy
 
-        in  PostgresMonad $ do
+        in  PostgresT $ do
                 conn <- ask
-                lift (doQuery conn)
+                liftIO (doQuery conn)
                 return ()
 
-    type InterpreterDeleteConstraint PostgresInterpreter db =
-             ( Every PTF.ToField (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+    type InterpreterDeleteConstraint (PostgresInterpreter m) db =
+             ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              ) 
 
     interpretDelete proxyU (proxyDB :: Proxy db) (delete :: Delete '(tableName, schema) conditioned) =
         let statement :: P.Query
             statement = fromString (makeDeleteStatement delete)
 
-            parameters :: HList (Fmap PostgresUniverse (Snds (Concat conditioned)))
+            parameters :: HList (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
             parameters = allToUniverse proxyU proxyDB (conditionValues (deleteCondition delete))
 
             containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxyConditioned
@@ -281,7 +279,7 @@ instance RelationalInterpreter PostgresInterpreter where
             doQuery = case everyToField of
                 EveryConstraint -> \conn -> P.execute conn statement parameters
 
-            proxyU :: Proxy (Universe PostgresInterpreter)
+            proxyU :: Proxy (Universe (PostgresInterpreter m))
             proxyU = Proxy
 
             proxyToField :: Proxy PTF.ToField
@@ -290,21 +288,21 @@ instance RelationalInterpreter PostgresInterpreter where
             proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
             proxyDBFlat = Proxy
 
-            proxyDBU :: Proxy (Fmap PostgresUniverse (Snds (Concat (Snds db))))
+            proxyDBU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
             proxyDBU = Proxy
 
             proxyConditioned :: Proxy (Snds (Concat conditioned))
             proxyConditioned = Proxy
 
-            proxyConditionedU :: Proxy (Fmap PostgresUniverse (Snds (Concat conditioned)))
+            proxyConditionedU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
             proxyConditionedU = Proxy
 
-        in  PostgresMonad $ do
+        in  PostgresT $ do
                 conn <- ask
-                lift (doQuery conn)
+                liftIO (doQuery conn)
                 return ()
 
-instance Show (Universe PostgresInterpreter t) where
+instance Show (Universe (PostgresInterpreter m) t) where
   show u = case u of
       UText t -> show t
       UBytes t -> show t
@@ -314,65 +312,65 @@ instance Show (Universe PostgresInterpreter t) where
       UDay d -> show d
       UNullable mebe -> show mebe
 
-instance InUniverse PostgresUniverse T.Text where
-  type UniverseType PostgresUniverse T.Text = T.Text
+instance InUniverse (PostgresUniverse m) T.Text where
+  type UniverseType (PostgresUniverse m) T.Text = T.Text
   toUniverse proxy = UText
   fromUniverse proxy (UText t) = Just t
   toUniverseAssociated proxy t = UText t
   fromUniverseAssociated (UText t) = t
 
-instance InUniverse PostgresUniverse BS.ByteString where
-  type UniverseType PostgresUniverse BS.ByteString = BS.ByteString
+instance InUniverse (PostgresUniverse m) BS.ByteString where
+  type UniverseType (PostgresUniverse m) BS.ByteString = BS.ByteString
   toUniverse proxy = UBytes
   fromUniverse proxy (UBytes bs) = Just bs
   toUniverseAssociated proxy bs = UBytes bs
   fromUniverseAssociated (UBytes bs) = bs
 
-instance InUniverse PostgresUniverse Int where
-  type UniverseType PostgresUniverse Int = Int
+instance InUniverse (PostgresUniverse m) Int where
+  type UniverseType (PostgresUniverse m) Int = Int
   toUniverse proxy = UInt
   fromUniverse proxy (UInt i) = Just i
   toUniverseAssociated proxy i = UInt i
   fromUniverseAssociated (UInt i) = i
 
-instance InUniverse PostgresUniverse Double where
-  type UniverseType PostgresUniverse Double = Double
+instance InUniverse (PostgresUniverse m) Double where
+  type UniverseType (PostgresUniverse m) Double = Double
   toUniverse proxy = UDouble
   fromUniverse proxy (UDouble d) = Just d
   toUniverseAssociated proxy d = UDouble d
   fromUniverseAssociated (UDouble d) = d
 
-instance InUniverse PostgresUniverse Bool where
-  type UniverseType PostgresUniverse Bool = Bool
+instance InUniverse (PostgresUniverse m) Bool where
+  type UniverseType (PostgresUniverse m) Bool = Bool
   toUniverse proxy = UBool
   fromUniverse proxy (UBool b) = Just b
   toUniverseAssociated proxy b = UBool b
   fromUniverseAssociated (UBool b) = b
 
-instance InUniverse PostgresUniverse Day where
-  type UniverseType PostgresUniverse Day = Day
+instance InUniverse (PostgresUniverse m) Day where
+  type UniverseType (PostgresUniverse m) Day = Day
   toUniverse proxy = UDay
   fromUniverse proxy (UDay d) = Just d
   toUniverseAssociated proxy = UDay
   fromUniverseAssociated (UDay d) = d
 
-instance InUniverse PostgresUniverse UTCTime where
+instance InUniverse (PostgresUniverse m) UTCTime where
   toUniverse proxy = UUTCTime
   fromUniverse proxy (UUTCTime t) = Just t
-  type UniverseType PostgresUniverse UTCTime = UTCTime
+  type UniverseType (PostgresUniverse m) UTCTime = UTCTime
   toUniverseAssociated proxy = UUTCTime
   fromUniverseAssociated (UUTCTime t) = t
 
-instance InUniverse PostgresUniverse a => InUniverse PostgresUniverse (Maybe a) where
+instance InUniverse (PostgresUniverse m) a => InUniverse (PostgresUniverse m) (Maybe a) where
   toUniverse proxyU = UNullable . fmap (toUniverse proxyU)
   fromUniverse (Proxy :: Proxy (Maybe a)) (UNullable x) = do
       contents <- x
       return $ fromUniverse (Proxy :: Proxy a) contents
-  type UniverseType PostgresUniverse (Maybe a) = Maybe (UniverseType PostgresUniverse a)
+  type UniverseType (PostgresUniverse m) (Maybe a) = Maybe (UniverseType (PostgresUniverse m) a)
   toUniverseAssociated proxy = UNullable . fmap (toUniverseAssociated proxy)
   fromUniverseAssociated (UNullable x) = fmap fromUniverseAssociated x
 
-instance PTF.ToField T.Text => PTF.ToField ((Universe PostgresInterpreter) t) where
+instance PTF.ToField T.Text => PTF.ToField ((Universe (PostgresInterpreter m)) t) where
   toField u = case u of
       UText str -> PTF.toField str
       UBytes bs -> PTF.toField (PT.Binary bs)
@@ -384,17 +382,17 @@ instance PTF.ToField T.Text => PTF.ToField ((Universe PostgresInterpreter) t) wh
       UNullable mebe -> PTF.toField mebe
 
 instance
-       ( InUniverse (Universe PostgresInterpreter) t
-       , PFF.FromField (UniverseType (Universe PostgresInterpreter) t)
+       ( InUniverse (Universe (PostgresInterpreter m)) t
+       , PFF.FromField (UniverseType (Universe (PostgresInterpreter m)) t)
        )
-    => PFF.FromField (Universe PostgresInterpreter t)
+    => PFF.FromField (Universe (PostgresInterpreter m) t)
   where
-    fromField = let otherParser :: PFF.FieldParser (UniverseType (Universe PostgresInterpreter) t)
+    fromField = let otherParser :: PFF.FieldParser (UniverseType (Universe (PostgresInterpreter m)) t)
                     otherParser = PFF.fromField
                 in  \field bytestring -> fmap (toUniverseAssociated Proxy) (otherParser field bytestring)
 
 
-postgresProxy :: Proxy PostgresInterpreter
+postgresProxy :: Proxy (PostgresInterpreter m)
 postgresProxy = Proxy
 
 -- | Wrapper over the PostgreSQL-simple RowParser, so that we can make it
