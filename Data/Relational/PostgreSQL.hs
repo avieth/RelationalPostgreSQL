@@ -54,6 +54,7 @@ import qualified Data.ByteString as BS
 import Data.Int (Int64)
 import Data.Time.Calendar
 import Data.Time.Clock
+import Data.UUID hiding (fromString)
 import Data.Relational
 import Data.Relational.Universe
 import Data.Relational.Interpreter
@@ -79,6 +80,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
       UDouble :: Double -> Universe (PostgresInterpreter m) t
       UBool :: Bool -> Universe (PostgresInterpreter m) t
       UDay :: Day -> Universe (PostgresInterpreter m) t
+      UUUID :: UUID -> Universe (PostgresInterpreter m) t
       UUTCTime :: UTCTime -> Universe (PostgresInterpreter m) t
       UNullable :: Maybe (Universe (PostgresInterpreter m) t) -> Universe (PostgresInterpreter m) (Maybe t)
 
@@ -310,6 +312,7 @@ instance Show (Universe (PostgresInterpreter m) t) where
       UDouble d -> show d
       UBool b -> show b
       UDay d -> show d
+      UUUID u -> show u
       UNullable mebe -> show mebe
 
 instance InUniverse (PostgresUniverse m) T.Text where
@@ -353,6 +356,13 @@ instance InUniverse (PostgresUniverse m) Day where
   fromUniverse proxy (UDay d) = Just d
   toUniverseAssociated proxy = UDay
   fromUniverseAssociated (UDay d) = d
+
+instance InUniverse (PostgresUniverse m) UUID where
+  type UniverseType (PostgresUniverse m) UUID = UUID
+  toUniverse proxy = UUUID
+  fromUniverse proxy (UUUID u) = Just u
+  toUniverseAssociated proxy = UUUID
+  fromUniverseAssociated (UUUID u) = u
 
 instance InUniverse (PostgresUniverse m) UTCTime where
   toUniverse proxy = UUTCTime
