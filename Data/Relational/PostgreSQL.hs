@@ -389,6 +389,7 @@ instance PTF.ToField T.Text => PTF.ToField ((Universe (PostgresInterpreter m)) t
       UBool b -> PTF.toField b
       UDay d -> PTF.toField d
       UUTCTime t -> PTF.toField t
+      UUUID t -> PTF.toField t
       UNullable mebe -> PTF.toField mebe
 
 instance
