@@ -40,6 +40,7 @@ import Control.Applicative
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
+import Control.Monad.FInterpreter
 import Data.Proxy
 import Data.List (intersperse)
 import Data.String (fromString)
@@ -58,6 +59,7 @@ import Data.UUID hiding (fromString)
 import Data.Relational
 import Data.Relational.Universe
 import Data.Relational.Interpreter
+import Data.Relational.RelationalF
 
 data PostgresInterpreter (m :: * -> *) = PostgresInterpreter
 type PostgresUniverse m = Universe (PostgresInterpreter m)
@@ -70,6 +72,19 @@ runPostgresT :: MonadIO m => P.ConnectInfo -> (forall a . m a -> IO a) -> Postgr
 runPostgresT connInfo ioRunner pm = do
     conn <- liftIO $ P.connect connInfo
     liftIO $ P.withTransaction conn (ioRunner (runReaderT (exitPostgresT pm) conn))
+
+instance
+    ( MonadIO m
+    , Functor m
+    , Every (InUniverse (PostgresUniverse m)) (Snds (Concat (Snds db)))
+    , InterpreterSelectConstraint (PostgresInterpreter m) db
+    , InterpreterInsertConstraint (PostgresInterpreter m) db
+    , InterpreterUpdateConstraint (PostgresInterpreter m) db
+    , InterpreterDeleteConstraint (PostgresInterpreter m) db
+    , Unique (TableNames db)
+    ) => FInterpreter PostgresT m (RelationalF db)
+  where
+    finterpret = interpreter (Proxy :: Proxy (PostgresInterpreter m))
 
 instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m) where
 
