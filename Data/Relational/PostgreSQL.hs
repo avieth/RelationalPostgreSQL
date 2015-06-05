@@ -77,7 +77,7 @@ instance
     ( MonadIO m
     , Functor m
     , Every (InUniverse (PostgresUniverse m)) (Snds (Concat (Snds db)))
-    , InterpreterSelectConstraint (PostgresInterpreter m) db
+    , InterpreterRelationConstraint (PostgresInterpreter m) db
     , InterpreterInsertConstraint (PostgresInterpreter m) db
     , InterpreterUpdateConstraint (PostgresInterpreter m) db
     , InterpreterDeleteConstraint (PostgresInterpreter m) db
@@ -101,26 +101,36 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
 
     type InterpreterMonad (PostgresInterpreter m) = PostgresT m
 
-    type InterpreterSelectConstraint (PostgresInterpreter m) db =
+    type InterpreterRelationConstraint (PostgresInterpreter m) db =
              ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              , Every PFF.FromField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              , TypeList (Snds (Concat (Snds db)))
              )
 
-    interpretSelect proxyPI (proxyDB :: Proxy db) (select :: Select '(tableName, schema) projected conditioned) =
-        let actualQuery :: P.Query
-            actualQuery = fromString (makeSelectQuery select)
+    interpretRelation proxyPI (proxyDB :: Proxy db) (relation :: Relation db projected) =
 
-            parameters :: HList (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
-            parameters = allToUniverse proxyU proxyDB (conditionValues (selectCondition select))
+        let (query, parameters) = relationQueryAndParameters proxyU relation
 
-            containsFmapProof1 = fmapContainsProof proxyU proxyDBFlat proxyConditioned
-            containsFmapProof2 = fmapContainsProof proxyU proxyDBFlat proxyProjected
+            doQuery :: P.Connection -> IO [HList (Fmap (PostgresUniverse m) (Snds projected))]
+            doQuery = case (parameters, everyFromField, typeListProof2) of
+                (SomeToRow parameters', EveryConstraint, TypeListProof) ->
+                      \conn -> P.query conn (fromString query) parameters'
 
-            everyToField = case containsFmapProof1 of
-                ContainsProof -> containsConstraint proxyToField proxyDBU proxyConditionedU
+            project :: Project projected
+            project = case relationParameterIsProjection relation of
+                HasConstraint -> projection Proxy
 
-            everyFromField = case containsFmapProof2 of
+            makeRow hlist = case typeListProof1 of
+                TypeListProof -> case convertToRow proxyU proxyDB project hlist of
+                    Nothing -> []
+                    Just x -> [x]
+
+            proxyU :: Proxy (Universe (PostgresInterpreter m))
+            proxyU = Proxy
+
+            containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxyProjected
+
+            everyFromField = case containsFmapProof of
                 ContainsProof -> containsConstraint proxyFromField proxyDBU proxyProjectedU
 
             typeListProof1 = typeListContainsProof proxyDBFlat proxyProjected
@@ -128,34 +138,14 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             typeListProof2 = case typeListProof1 of
                 TypeListProof -> typeListFmapProof proxyU proxyProjected
 
-            doQuery :: P.Connection -> IO [HList (Fmap (PostgresUniverse m) (Snds projected))]
-            doQuery = case (everyToField, everyFromField, typeListProof2) of
-                (EveryConstraint, EveryConstraint, TypeListProof) -> \conn -> P.query conn actualQuery parameters
-
-            makeRows hlist = case convertToRow proxyU proxyDB (selectProjection select) hlist of
-                Nothing -> []
-                Just x -> [x]
-
-            proxyU :: Proxy (Universe (PostgresInterpreter m))
-            proxyU = Proxy
-
             proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
             proxyDBFlat = Proxy
 
             proxyDBU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
             proxyDBU = Proxy
 
-            proxyToField :: Proxy PTF.ToField
-            proxyToField = Proxy
-
             proxyFromField :: Proxy PFF.FromField
             proxyFromField = Proxy
-
-            proxyConditioned :: Proxy (Snds (Concat conditioned))
-            proxyConditioned = Proxy
-
-            proxyConditionedU :: Proxy (Fmap (PostgresUniverse m) (Snds (Concat conditioned)))
-            proxyConditionedU = Proxy
 
             proxyProjected :: Proxy (Snds projected)
             proxyProjected = Proxy
@@ -165,13 +155,13 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
 
         in  PostgresT $ do
                 conn <- ask
-                fmap ((=<<) makeRows) (liftIO (doQuery conn))
+                fmap ((=<<) makeRow) (liftIO (doQuery conn))
 
     type InterpreterInsertConstraint (PostgresInterpreter m) db =
              ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              )
 
-    interpretInsert proxyPI (proxyDB :: Proxy db) (insert :: Insert '(tableName, schema)) =
+    interpretInsert proxyPI (proxyDB :: Proxy db) insert@(Insert table (row :: Row schema)) =
         let statement :: P.Query
             statement = fromString (makeInsertStatement insert)
 
@@ -218,7 +208,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
              , Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              )
 
-    interpretUpdate proxyPI (proxyDB :: Proxy db) (update :: Update '(tableName, schema) projected conditioned) =
+    interpretUpdate proxyPI (proxyDB :: Proxy db) update@(Update table project (condition :: Condition conditioned) (row :: Row projected)) =
         let statement :: P.Query
             statement = fromString (makeUpdateStatement update)
 
@@ -280,7 +270,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
              ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
              ) 
 
-    interpretDelete proxyU (proxyDB :: Proxy db) (delete :: Delete '(tableName, schema) conditioned) =
+    interpretDelete proxyU (proxyDB :: Proxy db) delete@(Delete table (condition :: Condition conditioned)) =
         let statement :: P.Query
             statement = fromString (makeDeleteStatement delete)
 
@@ -435,7 +425,7 @@ rowParserCons rp rpl = RowParserL (ConsHList <$> rp <*> (runRowParserL rpl))
 --   type signature of typeListFoldr) and then we use that to produce the
 --   RowParser proper.
 instance (TypeList types, Every PFF.FromField types) => PFR.FromRow (HList types) where
-  fromRow = runRowParserL (typeListFoldr f (RowParserL (pure EmptyHList)) proxyList proxyConstraint)
+  fromRow = runRowParserL (typeListBuild proxyList proxyConstraint f (RowParserL (pure EmptyHList)))
     where
       proxyList :: Proxy types
       proxyList = Proxy
@@ -515,6 +505,70 @@ makeUpdateStatement update =
     makeAssignments prj = case prj of
         EmptyProject -> []
         ConsProject col rest -> (concat [columnName col, " = ?"]) : (makeAssignments rest)
+
+data SomeToRow where
+    SomeToRow :: PTR.ToRow r => r -> SomeToRow
+
+relationQueryAndParameters
+  :: forall (universe :: * -> *) db projected .
+     ( Every (InUniverse universe) (Snds (Concat (Snds db)))
+     , Every PTF.ToField (Fmap universe (Snds (Concat (Snds db))))
+     )
+  => Proxy universe
+  -> Relation db projected
+  -> (String, SomeToRow)
+relationQueryAndParameters proxyU term = case term of
+
+    Intersection left right ->
+        let (lquery, lparams) = relationQueryAndParameters proxyU left
+            (rquery, rparams) = relationQueryAndParameters proxyU right
+        in  case (lparams, rparams) of
+                (SomeToRow l, SomeToRow r) ->
+                    (concat [lquery, " INTERSECT ", rquery], SomeToRow (l PT.:. r))
+
+    Union left right ->
+        let (lquery, lparams) = relationQueryAndParameters proxyU left
+            (rquery, rparams) = relationQueryAndParameters proxyU right
+        in  case (lparams, rparams) of
+                (SomeToRow l, SomeToRow r) ->
+                    (concat [lquery, " UNION ", rquery], SomeToRow (l PT.:. r))
+
+    Selection select@(Select table project (condition :: Condition conditioned)) ->
+
+        let query = makeSelectQuery select
+
+            parameters :: HList (Fmap universe (Snds (Concat conditioned)))
+            parameters = allToUniverse proxyU proxyDB (conditionValues (condition))
+
+            -- Proof of
+            --   Contains (Fmap universe (Snds (Concat (Snds db)))) (Fmap (Snds (Concat conditioned)))
+            --
+            containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxyConditionedFlat
+
+            -- Proof that we can ToField every one of the conditions.
+            everyToField = case containsFmapProof of
+                ContainsProof -> containsConstraint proxyToField proxyDBU proxyConditionedU
+
+            proxyDB :: Proxy db
+            proxyDB = Proxy
+
+            proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
+            proxyDBFlat = Proxy
+
+            proxyConditionedFlat :: Proxy (Snds (Concat conditioned))
+            proxyConditionedFlat = Proxy
+
+            proxyDBU :: Proxy (Fmap universe (Snds (Concat (Snds db))))
+            proxyDBU = Proxy
+
+            proxyConditionedU :: Proxy (Fmap universe (Snds (Concat conditioned)))
+            proxyConditionedU = Proxy
+
+            proxyToField :: Proxy PTF.ToField
+            proxyToField = Proxy
+
+        in  case everyToField of
+                EveryConstraint -> (query, SomeToRow parameters)
 
 makeSelectQuery :: Select '(tableName, schema) selected conditioned -> String
 makeSelectQuery select =
