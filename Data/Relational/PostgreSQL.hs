@@ -155,7 +155,9 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
 
         in  PostgresT $ do
                 conn <- ask
-                fmap ((=<<) makeRow) (liftIO (doQuery conn))
+                results <- liftIO (doQuery conn)
+                let rows = results >>= makeRow
+                return rows
 
     type InterpreterInsertConstraint (PostgresInterpreter m) db =
              ( Every PTF.ToField (Fmap (PostgresUniverse m) (Snds (Concat (Snds db))))
