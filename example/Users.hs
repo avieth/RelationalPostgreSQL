@@ -46,7 +46,7 @@ usersTable = table usersSchema
 type TestDatabase = '[ UsersTable ]
 
 makeSelectEmail :: T.Text -> Relational TestDatabase [Row '[EmailColumn]]
-makeSelectEmail username = rfselect (Select usersTable projection condition)
+makeSelectEmail username = rfrelation (Selection (Select usersTable projection condition))
   where
     projection = emailColumn :+| EndProject
     condition = usernameColumn .==. username .||. false .&&. true
