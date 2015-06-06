@@ -113,7 +113,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
 
             doQuery :: P.Connection -> IO [HList (Fmap (PostgresUniverse m) (Snds projected))]
             doQuery = case (parameters, everyFromField, typeListProof2) of
-                (SomeToRow parameters', EveryConstraint, TypeListProof) ->
+                (SomeToRow parameters', EveryConstraint, HasConstraint) ->
                       \conn -> P.query conn (fromString query) parameters'
 
             project :: Project projected
@@ -121,7 +121,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
                 HasConstraint -> projection Proxy
 
             makeRow hlist = case typeListProof1 of
-                TypeListProof -> case convertToRow proxyU proxyDB project hlist of
+                HasConstraint -> case convertToRow proxyU proxyDB project hlist of
                     Nothing -> []
                     Just x -> [x]
 
@@ -131,12 +131,12 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxyProjected
 
             everyFromField = case containsFmapProof of
-                ContainsProof -> containsConstraint proxyFromField proxyDBU proxyProjectedU
+                HasConstraint -> containsConstraint proxyFromField proxyDBU proxyProjectedU
 
             typeListProof1 = typeListContainsProof proxyDBFlat proxyProjected
 
             typeListProof2 = case typeListProof1 of
-                TypeListProof -> typeListFmapProof proxyU proxyProjected
+                HasConstraint -> typeListFmapProof proxyU proxyProjected
 
             proxyDBFlat :: Proxy (Snds (Concat (Snds db)))
             proxyDBFlat = Proxy
@@ -168,7 +168,8 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             statement = fromString (makeInsertStatement insert)
 
             hlist :: HList (Snds schema)
-            hlist = rowToHList (insertRow insert)
+            hlist = case rowToHListProof (insertRow insert) of
+                HasConstraint -> rowToHList (insertRow insert)
 
             parameters :: HList (Fmap (PostgresUniverse m) (Snds schema))
             parameters = allToUniverse proxyU proxyDB hlist
@@ -176,7 +177,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxySchema
 
             everyToField = case containsFmapProof of
-                ContainsProof -> containsConstraint proxyToField proxyDBU proxySchemaU
+                HasConstraint -> containsConstraint proxyToField proxyDBU proxySchemaU
 
             doQuery :: P.Connection -> IO Int64
             doQuery = case everyToField of
@@ -218,7 +219,8 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             conditionParameters = allToUniverse proxyU proxyDB (conditionValues (updateCondition update))
 
             hlist :: HList (Snds projected)
-            hlist = rowToHList (updateColumns update)
+            hlist = case rowToHListProof (updateColumns update) of
+                HasConstraint -> rowToHList (updateColumns update)
 
             assignmentParameters :: HList (Fmap (PostgresUniverse m) (Snds projected))
             assignmentParameters = allToUniverse proxyU proxyDB hlist
@@ -229,10 +231,10 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             containsFmapProofPrj = fmapContainsProof proxyU proxyDBFlat proxyProjected
 
             everyToFieldCond = case containsFmapProofCond of
-                ContainsProof -> containsConstraint proxyToField proxyDBU proxyConditionedU
+                HasConstraint -> containsConstraint proxyToField proxyDBU proxyConditionedU
 
             everyToFieldPrj = case containsFmapProofPrj of
-                ContainsProof -> containsConstraint proxyToField proxyDBU proxyProjectedU
+                HasConstraint -> containsConstraint proxyToField proxyDBU proxyProjectedU
 
             doQuery :: P.Connection -> IO Int64
             doQuery = case (everyToFieldPrj, everyToFieldCond) of
@@ -282,7 +284,7 @@ instance (Functor m, MonadIO m) => RelationalInterpreter (PostgresInterpreter m)
             containsFmapProof = fmapContainsProof proxyU proxyDBFlat proxyConditioned
 
             everyToField = case containsFmapProof of
-                ContainsProof -> containsConstraint proxyToField proxyDBU proxyConditionedU
+                HasConstraint -> containsConstraint proxyToField proxyDBU proxyConditionedU
  
             doQuery :: P.Connection -> IO Int64
             doQuery = case everyToField of
@@ -535,7 +537,7 @@ relationQueryAndParameters proxyU term = case term of
                 (SomeToRow l, SomeToRow r) ->
                     (concat [lquery, " UNION ", rquery], SomeToRow (l PT.:. r))
 
-    Selection select@(Select table project (condition :: Condition conditioned)) ->
+    Selection select@(Select table selected projected (condition :: Condition conditioned)) ->
 
         let query = makeSelectQuery select
 
@@ -549,7 +551,7 @@ relationQueryAndParameters proxyU term = case term of
 
             -- Proof that we can ToField every one of the conditions.
             everyToField = case containsFmapProof of
-                ContainsProof -> containsConstraint proxyToField proxyDBU proxyConditionedU
+                HasConstraint -> containsConstraint proxyToField proxyDBU proxyConditionedU
 
             proxyDB :: Proxy db
             proxyDB = Proxy
@@ -572,7 +574,9 @@ relationQueryAndParameters proxyU term = case term of
         in  case everyToField of
                 EveryConstraint -> (query, SomeToRow parameters)
 
-makeSelectQuery :: Select '(tableName, schema) selected conditioned -> String
+makeSelectQuery
+  :: Select '(tableName, schema) selected projected conditioned
+  -> String
 makeSelectQuery select =
     concat
     [ "SELECT "
@@ -583,18 +587,19 @@ makeSelectQuery select =
     , conditionClause
     ]
   where
-    projectionClause = makeProjectionClause (selectProjection select)
+    projectionClause = makeProjectionClause (selectProjections select)
     conditionClause = makeConditionClause (selectCondition select)
 
-makeProjectionClause :: Project ss -> String
+makeProjectionClause :: (Project ss, Project ts) -> String
 makeProjectionClause = concat . intersperse "," . makeSelectFields
 
   where
 
-    makeSelectFields :: Project ss -> [String]
-    makeSelectFields sel = case sel of
-        EmptyProject -> []
-        ConsProject col rest -> columnName col : makeSelectFields rest
+    makeSelectFields :: (Project ss, Project ts) -> [String]
+    makeSelectFields ps = case ps of
+        (EmptyProject, EmptyProject) -> []
+        (ConsProject col rest, ConsProject col' rest') ->
+            (concat [columnName col, " as ", columnName col']) : makeSelectFields (rest, rest')
 
 makeConditionClause :: Condition css -> String
 makeConditionClause constr = case constr of
