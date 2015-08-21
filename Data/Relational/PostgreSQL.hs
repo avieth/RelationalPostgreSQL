@@ -73,6 +73,11 @@ runPostgresT connInfo ioRunner pm = do
     conn <- liftIO $ P.connect connInfo
     liftIO $ P.withTransaction conn (ioRunner (runReaderT (exitPostgresT pm) conn))
 
+instance FTrans PostgresT where
+    transInterp interp term = PostgresT . ReaderT $ \conn ->
+        let q = fmap ((flip runReaderT) conn . exitPostgresT) term
+        in  interp q
+
 instance
     ( MonadIO m
     , Functor m
