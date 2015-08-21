@@ -68,10 +68,10 @@ newtype PostgresT m a = PostgresT {
     exitPostgresT :: ReaderT P.Connection m a
   } deriving (Functor, Applicative, Monad, MonadTrans, MonadIO)
 
-runPostgresT :: MonadIO m => P.ConnectInfo -> (forall a . m a -> IO a) -> PostgresT m a -> m a
-runPostgresT connInfo ioRunner pm = do
+runPostgresT :: MonadIO m => P.ConnectInfo -> (forall a . m a -> IO a) -> PostgresT m a -> IO a
+runPostgresT connInfo runner pm = do
     conn <- liftIO $ P.connect connInfo
-    liftIO $ P.withTransaction conn (ioRunner (runReaderT (exitPostgresT pm) conn))
+    P.withTransaction conn (runner (runReaderT (exitPostgresT pm) conn))
 
 instance FTrans PostgresT where
     transInterp interp term = PostgresT . ReaderT $ \conn ->
