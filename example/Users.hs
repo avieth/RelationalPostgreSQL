@@ -10,10 +10,13 @@ Portability : non-portable (GHC only)
 
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
+import GHC.TypeLits (Symbol, KnownSymbol)
 import qualified Data.Text as T
 import Control.Monad
-import Control.Monad.Free (iterM)
+import Control.Monad.Free (iterM, liftF)
+import Data.TypeNat.Nat
 import Data.String
 import Data.Proxy
 import Data.Relational
@@ -35,40 +38,64 @@ emailColumn = column
 
 type UsersSchema = '[ UsernameColumn, EmailColumn ]
 
-usersSchema :: Schema UsersSchema
+usersSchema :: Schema Two UsersSchema
 usersSchema = usernameColumn :| emailColumn :| EndSchema
 
 type UsersTable = '( "users", UsersSchema )
 
 usersTable :: Table UsersTable
-usersTable = table usersSchema
+usersTable = table
 
 type TestDatabase = '[ UsersTable ]
 
-makeSelectEmail :: T.Text -> Relational TestDatabase [Row '[EmailColumn]]
-makeSelectEmail username = rfrelation (Selection (Select usersTable projection condition))
+makeSelectEmail
+    :: forall alias .
+       ( KnownSymbol alias )
+    => Proxy alias
+    -> T.Text
+    -> Relation PostgresUniverse TestDatabase alias '[EmailColumn]
+makeSelectEmail _ username = Base usersTable Proxy selection projection condition
   where
-    projection = emailColumn :+| EndProject
-    condition = usernameColumn .==. username .||. false .&&. true
+    selection :: Select One '[ '(alias, "email", T.Text) ]
+    selection = emailColumn :+> EndSelect
+    projection = emailColumn :| EndProject
+    condition = col (Proxy :: Proxy '(alias, "username")) .==. lit username .||. false .&&. true
 
-makeInsert :: T.Text -> T.Text -> Relational TestDatabase ()
-makeInsert username email = rfinsert (Insert usersTable row)
+makeInsert
+    :: T.Text
+    -> T.Text
+    -> Insert PostgresUniverse TestDatabase UsersTable
+makeInsert username email = Insert usersTable row
   where
     row =   (fromColumnAndValue usernameColumn username)
         :&| (fromColumnAndValue emailColumn email)
         :&| EndRow
 
-makeUpdate :: T.Text -> T.Text -> Relational TestDatabase ()
-makeUpdate username email = rfupdate (Update usersTable projection condition row)
+makeUpdate
+    :: T.Text
+    -> T.Text
+    -> Update
+           PostgresUniverse
+           TestDatabase
+           UsersTable
+           '[ EmailColumn ]
+           '[ '[ '[ '(T.Text, Just '("users", "username")), '(T.Text, Nothing) ] ] ]
+makeUpdate username email = Update usersTable projection condition row
   where
-    projection = emailColumn :+| EndProject
+    projection = emailColumn :| EndProject
     row = (fromColumnAndValue emailColumn email) :&| EndRow
-    condition = usernameColumn .==. username .||. false .&&. true
+    condition = col (Proxy :: Proxy '("users", "username")) .==. lit username .||. false .&&. true
 
-makeDelete :: T.Text -> Relational TestDatabase ()
-makeDelete username = rfdelete (Delete usersTable condition)
+makeDelete
+    :: T.Text
+    -> Delete
+           PostgresUniverse
+           TestDatabase
+           UsersTable
+           '[ '[ '[ '(T.Text, Just '("users", "username")), '(T.Text, Nothing) ] ] ]
+makeDelete username = Delete usersTable condition
   where
-    condition = usernameColumn .==. username .||. false .&&. true
+    condition = col (Proxy :: Proxy '("users", "username")) .==. lit username .||. false .&&. true
 
 main = do
     args <- getArgs
@@ -84,8 +111,9 @@ mainSelect args =
     let username = args !! 0
         proxy :: Proxy (PostgresInterpreter IO)
         proxy = Proxy
-        term = iterM (interpreter proxy) (makeSelectEmail username)
-    in  do outcome <- runPostgresT (defaultConnectInfo { connectUser="alex" }) id term
+        term :: RelationalF PostgresUniverse TestDatabase [Row '[EmailColumn]]
+        term = rfrelation $ makeSelectEmail (Proxy :: Proxy "users") username
+    in  do outcome <- runPostgresT (defaultConnectInfo { connectUser="alex" }) id id id (iterM (interpreter proxy) (liftF term))
            print outcome
 
 mainInsert args =
@@ -93,20 +121,23 @@ mainInsert args =
         email = args !! 1
         proxy :: Proxy (PostgresInterpreter IO)
         proxy = Proxy
-        term = iterM (interpreter proxy) (makeInsert username email)
-    in  runPostgresT (defaultConnectInfo { connectUser="alex" }) id term
+        term :: RelationalF PostgresUniverse TestDatabase ()
+        term = rfinsert $ makeInsert username email
+    in  runPostgresT (defaultConnectInfo { connectUser="alex" }) id id id (iterM (interpreter proxy) (liftF term))
 
 mainUpdate args =
     let username = args !! 0
         email = args !! 1
         proxy :: Proxy (PostgresInterpreter IO)
         proxy = Proxy
-        term = iterM (interpreter proxy) (makeUpdate username email)
-    in  runPostgresT (defaultConnectInfo { connectUser="alex" }) id term
+        term :: RelationalF PostgresUniverse TestDatabase ()
+        term = rfupdate $ makeUpdate username email
+    in  runPostgresT (defaultConnectInfo { connectUser="alex" }) id id id (iterM (interpreter proxy) (liftF term))
 
 mainDelete args =
     let username = args !! 0
         proxy :: Proxy (PostgresInterpreter IO)
         proxy = Proxy
-        term = iterM (interpreter proxy) (makeDelete username)
-    in  runPostgresT (defaultConnectInfo { connectUser="alex" }) id term
+        term :: RelationalF PostgresUniverse TestDatabase ()
+        term = rfdelete $ makeDelete username
+    in  runPostgresT (defaultConnectInfo { connectUser="alex" }) id id id (iterM (interpreter proxy) (liftF term))
